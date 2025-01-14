@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2024 LiveKit, Inc.
+ * Copyright 2023-2025 LiveKit, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -84,7 +84,7 @@ constructor(
     private var currentWs: WebSocket? = null
     private var isReconnecting: Boolean = false
     var listener: Listener? = null
-    private var serverVersion: Semver? = null
+    internal var serverVersion: Semver? = null
     private var lastUrl: String? = null
     private var lastOptions: ConnectOptions? = null
     private var lastRoomOptions: RoomOptions? = null
@@ -697,6 +697,10 @@ constructor(
                 listener?.onParticipantUpdate(response.update.participantsList)
             }
 
+            LivekitRtc.SignalResponse.MessageCase.TRACK_SUBSCRIBED -> {
+                listener?.onLocalTrackSubscribed(response.trackSubscribed)
+            }
+
             LivekitRtc.SignalResponse.MessageCase.TRACK_PUBLISHED -> {
                 listener?.onLocalTrackPublished(response.trackPublished)
             }
@@ -766,7 +770,7 @@ constructor(
                 // TODO
             }
 
-            LivekitRtc.SignalResponse.MessageCase.ERROR_RESPONSE -> {
+            LivekitRtc.SignalResponse.MessageCase.REQUEST_RESPONSE -> {
                 // TODO
             }
 
@@ -837,6 +841,7 @@ constructor(
         lastUrl = null
         lastOptions = null
         lastRoomOptions = null
+        serverVersion = null
     }
 
     interface Listener {
@@ -857,6 +862,7 @@ constructor(
         fun onSubscriptionPermissionUpdate(subscriptionPermissionUpdate: LivekitRtc.SubscriptionPermissionUpdate)
         fun onRefreshToken(token: String)
         fun onLocalTrackUnpublished(trackUnpublished: LivekitRtc.TrackUnpublishedResponse)
+        fun onLocalTrackSubscribed(trackSubscribed: LivekitRtc.TrackSubscribed)
     }
 
     companion object {

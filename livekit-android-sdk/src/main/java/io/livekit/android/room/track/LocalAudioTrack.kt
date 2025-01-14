@@ -23,10 +23,15 @@ import androidx.core.content.ContextCompat
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedFactory
 import dagger.assisted.AssistedInject
+import io.livekit.android.audio.AudioBufferCallback
+import io.livekit.android.audio.AudioBufferCallbackDispatcher
 import io.livekit.android.audio.AudioProcessingController
+import io.livekit.android.audio.AudioRecordSamplesDispatcher
+import io.livekit.android.audio.MixerAudioBufferCallback
 import io.livekit.android.dagger.InjectionNames
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.util.FlowObservable
+import io.livekit.android.util.LKLog
 import io.livekit.android.util.flow
 import io.livekit.android.util.flowDelegate
 import kotlinx.coroutines.CoroutineDispatcher
@@ -37,10 +42,13 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import livekit.LivekitModels.AudioTrackFeature
+import livekit.org.webrtc.AudioTrackSink
 import livekit.org.webrtc.MediaConstraints
 import livekit.org.webrtc.PeerConnectionFactory
 import livekit.org.webrtc.RtpSender
 import livekit.org.webrtc.RtpTransceiver
+import livekit.org.webrtc.audio.AudioDeviceModule
+import livekit.org.webrtc.audio.JavaAudioDeviceModule
 import java.util.UUID
 import javax.inject.Named
 
@@ -58,6 +66,10 @@ constructor(
     private val audioProcessingController: AudioProcessingController,
     @Named(InjectionNames.DISPATCHER_DEFAULT)
     private val dispatcher: CoroutineDispatcher,
+    @Named(InjectionNames.LOCAL_AUDIO_RECORD_SAMPLES_DISPATCHER)
+    private val audioRecordSamplesDispatcher: AudioRecordSamplesDispatcher,
+    @Named(InjectionNames.LOCAL_AUDIO_BUFFER_CALLBACK_DISPATCHER)
+    private val audioBufferCallbackDispatcher: AudioBufferCallbackDispatcher,
 ) : AudioTrack(name, mediaTrack) {
     /**
      * To only be used for flow delegate scoping, and should not be cancelled.
@@ -67,6 +79,40 @@ constructor(
     internal var transceiver: RtpTransceiver? = null
     internal val sender: RtpSender?
         get() = transceiver?.sender
+
+    private val trackSinks = mutableSetOf<AudioTrackSink>()
+
+    /**
+     * Note: This function relies on us setting
+     * [JavaAudioDeviceModule.Builder.setSamplesReadyCallback].
+     * If you provide your own [AudioDeviceModule], or set your own
+     * callback, your sink will not receive any audio data.
+     *
+     * @see AudioTrack.addSink
+     */
+    override fun addSink(sink: AudioTrackSink) {
+        synchronized(trackSinks) {
+            trackSinks.add(sink)
+            audioRecordSamplesDispatcher.registerSink(sink)
+        }
+    }
+
+    override fun removeSink(sink: AudioTrackSink) {
+        synchronized(trackSinks) {
+            trackSinks.remove(sink)
+            audioRecordSamplesDispatcher.unregisterSink(sink)
+        }
+    }
+
+    /**
+     * Use this method to mix in custom audio.
+     *
+     * See [MixerAudioBufferCallback] for automatic handling of mixing in
+     * the provided audio data.
+     */
+    fun setAudioBufferCallback(callback: AudioBufferCallback?) {
+        audioBufferCallbackDispatcher.bufferCallback = callback
+    }
 
     /**
      * Changes can be observed by using [io.livekit.android.util.flow]
@@ -107,6 +153,16 @@ constructor(
         return features
     }
 
+    override fun dispose() {
+        synchronized(trackSinks) {
+            for (sink in trackSinks) {
+                trackSinks.remove(sink)
+                audioRecordSamplesDispatcher.unregisterSink(sink)
+            }
+        }
+        super.dispose()
+    }
+
     companion object {
         internal fun createTrack(
             context: Context,
@@ -118,7 +174,7 @@ constructor(
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
-                throw SecurityException("Record audio permissions are required to create an audio track.")
+                LKLog.w { "Record audio permissions not granted, microphone recording will not be used." }
             }
 
             val audioConstraints = MediaConstraints()

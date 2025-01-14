@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2024 LiveKit, Inc.
+ * Copyright 2023-2025 LiveKit, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package io.livekit.android.room
 import android.os.SystemClock
 import androidx.annotation.VisibleForTesting
 import com.google.protobuf.ByteString
+import com.vdurmont.semver4j.Semver
 import io.livekit.android.ConnectOptions
 import io.livekit.android.RoomOptions
 import io.livekit.android.dagger.InjectionNames
@@ -147,6 +148,9 @@ internal constructor(
     private var connectOptions: ConnectOptions? = null
     private var lastRoomOptions: RoomOptions? = null
     private var participantSid: String? = null
+
+    internal val serverVersion: Semver?
+        get() = client.serverVersion
 
     private val publisherObserver = PublisherTransportObserver(this, client)
     private val subscriberObserver = SubscriberTransportObserver(this, client)
@@ -776,6 +780,8 @@ internal constructor(
         suspend fun onPostReconnect(isFullReconnect: Boolean)
         fun onLocalTrackUnpublished(trackUnpublished: LivekitRtc.TrackUnpublishedResponse)
         fun onTranscriptionReceived(transcription: LivekitModels.Transcription)
+        fun onLocalTrackSubscribed(trackSubscribed: LivekitRtc.TrackSubscribed)
+        fun onRpcPacketReceived(dp: LivekitModels.DataPacket)
     }
 
     companion object {
@@ -791,7 +797,7 @@ internal constructor(
          */
         @VisibleForTesting
         const val LOSSY_DATA_CHANNEL_LABEL = "_lossy"
-        internal const val MAX_DATA_PACKET_SIZE = 15000
+        internal const val MAX_DATA_PACKET_SIZE = 15360 // 15 KB
         private const val MAX_RECONNECT_RETRIES = 10
         private const val MAX_RECONNECT_TIMEOUT = 60 * 1000
         private const val MAX_ICE_CONNECT_TIMEOUT_MS = 20000
@@ -909,6 +915,10 @@ internal constructor(
         cont.resume(response.track)
     }
 
+    override fun onLocalTrackSubscribed(trackSubscribed: LivekitRtc.TrackSubscribed) {
+        listener?.onLocalTrackSubscribed(trackSubscribed)
+    }
+
     override fun onParticipantUpdate(updates: List<LivekitModels.ParticipantInfo>) {
         listener?.onUpdateParticipants(updates)
     }
@@ -1023,10 +1033,32 @@ internal constructor(
                 listener?.onTranscriptionReceived(dp.transcription)
             }
 
+            LivekitModels.DataPacket.ValueCase.METRICS -> {
+                // TODO
+            }
+
+            LivekitModels.DataPacket.ValueCase.CHAT_MESSAGE -> {
+                // TODO
+            }
+
+            LivekitModels.DataPacket.ValueCase.RPC_REQUEST,
+            LivekitModels.DataPacket.ValueCase.RPC_ACK,
+            LivekitModels.DataPacket.ValueCase.RPC_RESPONSE,
+            -> {
+                listener?.onRpcPacketReceived(dp)
+            }
             LivekitModels.DataPacket.ValueCase.VALUE_NOT_SET,
             null,
             -> {
                 LKLog.v { "invalid value for data packet" }
+            }
+
+            LivekitModels.DataPacket.ValueCase.STREAM_HEADER -> {
+                // TODO
+            }
+
+            LivekitModels.DataPacket.ValueCase.STREAM_CHUNK -> {
+                // TODO
             }
         }
     }

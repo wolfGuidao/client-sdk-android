@@ -16,7 +16,6 @@
 
 package io.livekit.android.room.track
 
-import io.livekit.android.webrtc.peerconnection.executeBlockingOnRTCThread
 import livekit.org.webrtc.AudioTrack
 import livekit.org.webrtc.AudioTrackSink
 import livekit.org.webrtc.RtpReceiver
@@ -30,30 +29,15 @@ class RemoteAudioTrack(
     internal val receiver: RtpReceiver,
 ) : io.livekit.android.room.track.AudioTrack(name, rtcTrack) {
 
-    /**
-     * Adds a sink that receives the audio bytes and related information
-     * for this audio track. Repeated calls using the same sink will
-     * only add the sink once.
-     *
-     * Implementations should copy the audio data into a local copy if they wish
-     * to use the data after this function returns.
-     */
-    fun addSink(sink: AudioTrackSink) {
-        executeBlockingOnRTCThread {
-            if (!isDisposed) {
-                rtcTrack.addSink(sink)
-            }
+    override fun addSink(sink: AudioTrackSink) {
+        withRTCTrack {
+            rtcTrack.addSink(sink)
         }
     }
 
-    /**
-     * Removes a previously added sink.
-     */
-    fun removeSink(sink: AudioTrackSink) {
-        executeBlockingOnRTCThread {
-            if (!isDisposed) {
-                rtcTrack.removeSink(sink)
-            }
+    override fun removeSink(sink: AudioTrackSink) {
+        withRTCTrack {
+            rtcTrack.removeSink(sink)
         }
     }
 
@@ -66,10 +50,8 @@ class RemoteAudioTrack(
      * * values greater than 1 will boost the volume of the track.
      */
     fun setVolume(volume: Double) {
-        executeBlockingOnRTCThread {
-            if (!isDisposed) {
-                rtcTrack.setVolume(volume)
-            }
+        withRTCTrack {
+            rtcTrack.setVolume(volume)
         }
     }
 }
