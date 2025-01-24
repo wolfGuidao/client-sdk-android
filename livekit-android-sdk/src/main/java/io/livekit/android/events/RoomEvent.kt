@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2024 LiveKit, Inc.
+ * Copyright 2023-2025 LiveKit, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -94,7 +94,7 @@ sealed class RoomEvent(val room: Room) : Event() {
      */
     class ParticipantAttributesChanged(
         room: Room,
-        participant: Participant,
+        val participant: Participant,
         /**
          * The attributes that have changed and their new associated values.
          */
@@ -126,6 +126,11 @@ sealed class RoomEvent(val room: Room) : Event() {
      * [LocalTrackPublication], or if the server has requested the participant to be muted
      */
     class TrackUnmuted(room: Room, val publication: TrackPublication, val participant: Participant) : RoomEvent(room)
+
+    /**
+     * Fired when the first remote participant has subscribed to the localParticipant's track
+     */
+    class LocalTrackSubscribed(room: Room, val publication: LocalTrackPublication, val participant: LocalParticipant) : RoomEvent(room)
 
     /**
      * When a new track is published to room after the local participant has joined. It will
@@ -267,6 +272,10 @@ enum class DisconnectReason {
     JOIN_FAILURE,
     MIGRATION,
     SIGNAL_CLOSE,
+    ROOM_CLOSED,
+    USER_UNAVAILABLE,
+    USER_REJECTED,
+    SIP_TRUNK_FAILURE,
 }
 
 /**
@@ -283,6 +292,10 @@ fun LivekitModels.DisconnectReason?.convert(): DisconnectReason {
         LivekitModels.DisconnectReason.JOIN_FAILURE -> DisconnectReason.JOIN_FAILURE
         LivekitModels.DisconnectReason.MIGRATION -> DisconnectReason.MIGRATION
         LivekitModels.DisconnectReason.SIGNAL_CLOSE -> DisconnectReason.SIGNAL_CLOSE
+        LivekitModels.DisconnectReason.ROOM_CLOSED -> DisconnectReason.ROOM_CLOSED
+        LivekitModels.DisconnectReason.USER_UNAVAILABLE -> DisconnectReason.USER_UNAVAILABLE
+        LivekitModels.DisconnectReason.USER_REJECTED -> DisconnectReason.USER_REJECTED
+        LivekitModels.DisconnectReason.SIP_TRUNK_FAILURE -> DisconnectReason.SIP_TRUNK_FAILURE
         LivekitModels.DisconnectReason.UNKNOWN_REASON,
         LivekitModels.DisconnectReason.UNRECOGNIZED,
         null,

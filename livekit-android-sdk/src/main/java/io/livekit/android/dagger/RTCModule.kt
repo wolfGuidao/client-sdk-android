@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2024 LiveKit, Inc.
+ * Copyright 2023-2025 LiveKit, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,13 @@ import android.javax.sdp.SdpFactory
 import android.media.AudioAttributes
 import android.media.MediaRecorder
 import android.os.Build
-import androidx.annotation.Nullable
 import dagger.Module
 import dagger.Provides
 import io.livekit.android.LiveKit
+import io.livekit.android.audio.AudioBufferCallbackDispatcher
 import io.livekit.android.audio.AudioProcessingController
 import io.livekit.android.audio.AudioProcessorOptions
+import io.livekit.android.audio.AudioRecordSamplesDispatcher
 import io.livekit.android.audio.CommunicationWorkaround
 import io.livekit.android.memory.CloseableManager
 import io.livekit.android.util.LKLog
@@ -35,6 +36,7 @@ import io.livekit.android.webrtc.CustomAudioProcessingFactory
 import io.livekit.android.webrtc.CustomVideoDecoderFactory
 import io.livekit.android.webrtc.CustomVideoEncoderFactory
 import io.livekit.android.webrtc.peerconnection.executeBlockingOnRTCThread
+import io.livekit.android.webrtc.peerconnection.executeOnRTCThread
 import livekit.org.webrtc.AudioProcessingFactory
 import livekit.org.webrtc.EglBase
 import livekit.org.webrtc.Logging
@@ -63,6 +65,11 @@ typealias CapabilitiesGetter = @JvmSuppressWildcards (MediaStreamTrack.MediaType
 internal object RTCModule {
 
     /**
+     * To only be written to on the WebRTC thread.
+     */
+    private var hasInitializedWebrtc = false
+
+    /**
      * Certain classes require libwebrtc to be initialized prior to use.
      *
      * If your provision depends on libwebrtc initialization, just add it
@@ -85,33 +92,54 @@ internal object RTCModule {
     @Singleton
     @Named(InjectionNames.LIB_WEBRTC_INITIALIZATION)
     fun libWebrtcInitialization(appContext: Context): LibWebrtcInitialization {
-        PeerConnectionFactory.initialize(
-            PeerConnectionFactory.InitializationOptions
-                .builder(appContext)
-                .setNativeLibraryName("lkjingle_peerconnection_so")
-                .setInjectableLogger(
-                    { s, severity, s2 ->
-                        if (!LiveKit.enableWebRTCLogging) {
-                            return@setInjectableLogger
-                        }
+        if (!hasInitializedWebrtc) {
+            executeBlockingOnRTCThread {
+                if (!hasInitializedWebrtc) {
+                    hasInitializedWebrtc = true
+                    PeerConnectionFactory.initialize(
+                        PeerConnectionFactory.InitializationOptions
+                            .builder(appContext)
+                            .setNativeLibraryName("lkjingle_peerconnection_so")
+                            .setInjectableLogger(
+                                { s, severity, s2 ->
+                                    if (!LiveKit.enableWebRTCLogging) {
+                                        return@setInjectableLogger
+                                    }
 
-                        val loggingLevel = when (severity) {
-                            Logging.Severity.LS_VERBOSE -> LoggingLevel.VERBOSE
-                            Logging.Severity.LS_INFO -> LoggingLevel.INFO
-                            Logging.Severity.LS_WARNING -> LoggingLevel.WARN
-                            Logging.Severity.LS_ERROR -> LoggingLevel.ERROR
-                            else -> LoggingLevel.OFF
-                        }
+                                    val loggingLevel = when (severity) {
+                                        Logging.Severity.LS_VERBOSE -> LoggingLevel.VERBOSE
+                                        Logging.Severity.LS_INFO -> LoggingLevel.INFO
+                                        Logging.Severity.LS_WARNING -> LoggingLevel.WARN
+                                        Logging.Severity.LS_ERROR -> LoggingLevel.ERROR
+                                        else -> LoggingLevel.OFF
+                                    }
 
-                        LKLog.log(loggingLevel) {
-                            Timber.log(loggingLevel.toAndroidLogPriority(), "$s2: $s")
-                        }
-                    },
-                    Logging.Severity.LS_VERBOSE,
-                )
-                .createInitializationOptions(),
-        )
+                                    LKLog.log(loggingLevel) {
+                                        Timber.log(loggingLevel.toAndroidLogPriority(), "$s2: $s")
+                                    }
+                                },
+                                Logging.Severity.LS_VERBOSE,
+                            )
+                            .createInitializationOptions(),
+                    )
+                }
+            }
+        }
         return LibWebrtcInitialization
+    }
+
+    @Provides
+    @Named(InjectionNames.LOCAL_AUDIO_RECORD_SAMPLES_DISPATCHER)
+    @Singleton
+    fun localAudioSamplesDispatcher(): AudioRecordSamplesDispatcher {
+        return AudioRecordSamplesDispatcher()
+    }
+
+    @Provides
+    @Named(InjectionNames.LOCAL_AUDIO_BUFFER_CALLBACK_DISPATCHER)
+    @Singleton
+    fun localAudioBufferCallbackDispatcher(): AudioBufferCallbackDispatcher {
+        return AudioBufferCallbackDispatcher()
     }
 
     @Provides
@@ -119,15 +147,17 @@ internal object RTCModule {
     @JvmSuppressWildcards
     fun audioModule(
         @Named(InjectionNames.OVERRIDE_AUDIO_DEVICE_MODULE)
-        @Nullable
         audioDeviceModuleOverride: AudioDeviceModule?,
         @Named(InjectionNames.OVERRIDE_JAVA_AUDIO_DEVICE_MODULE_CUSTOMIZER)
-        @Nullable
         moduleCustomizer: ((builder: JavaAudioDeviceModule.Builder) -> Unit)?,
         audioOutputAttributes: AudioAttributes,
         appContext: Context,
         closeableManager: CloseableManager,
         communicationWorkaround: CommunicationWorkaround,
+        @Named(InjectionNames.LOCAL_AUDIO_RECORD_SAMPLES_DISPATCHER)
+        audioRecordSamplesDispatcher: AudioRecordSamplesDispatcher,
+        @Named(InjectionNames.LOCAL_AUDIO_BUFFER_CALLBACK_DISPATCHER)
+        audioBufferCallbackDispatcher: AudioBufferCallbackDispatcher,
     ): AudioDeviceModule {
         if (audioDeviceModuleOverride != null) {
             return audioDeviceModuleOverride
@@ -202,9 +232,11 @@ internal object RTCModule {
             .setAudioTrackErrorCallback(audioTrackErrorCallback)
             .setAudioRecordStateCallback(audioRecordStateCallback)
             .setAudioTrackStateCallback(audioTrackStateCallback)
+            .setSamplesReadyCallback(audioRecordSamplesDispatcher)
             // VOICE_COMMUNICATION needs to be used for echo cancelling.
             .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .setAudioAttributes(audioOutputAttributes)
+            .setAudioBufferCallback(audioBufferCallbackDispatcher)
 
         moduleCustomizer?.invoke(builder)
         return builder.createAudioDeviceModule()
@@ -215,7 +247,6 @@ internal object RTCModule {
     @Singleton
     fun eglBase(
         @Named(InjectionNames.OVERRIDE_EGL_BASE)
-        @Nullable
         eglBaseOverride: EglBase?,
         memoryManager: CloseableManager,
     ): EglBase {
@@ -236,7 +267,6 @@ internal object RTCModule {
         videoHwAccel: Boolean,
         eglContext: EglBase.Context,
         @Named(InjectionNames.OVERRIDE_VIDEO_ENCODER_FACTORY)
-        @Nullable
         videoEncoderFactoryOverride: VideoEncoderFactory?,
     ): VideoEncoderFactory {
         return videoEncoderFactoryOverride ?: if (videoHwAccel) {
@@ -281,7 +311,6 @@ internal object RTCModule {
         videoHwAccel: Boolean,
         eglContext: EglBase.Context,
         @Named(InjectionNames.OVERRIDE_VIDEO_DECODER_FACTORY)
-        @Nullable
         videoDecoderFactoryOverride: VideoDecoderFactory?,
     ): VideoDecoderFactory {
         return videoDecoderFactoryOverride ?: if (videoHwAccel) {
@@ -317,7 +346,13 @@ internal object RTCModule {
                     }
                 }
                 .createPeerConnectionFactory()
-                .apply { memoryManager.registerClosable { dispose() } }
+                .apply {
+                    memoryManager.registerClosable {
+                        executeOnRTCThread {
+                            dispose()
+                        }
+                    }
+                }
         }
     }
 
