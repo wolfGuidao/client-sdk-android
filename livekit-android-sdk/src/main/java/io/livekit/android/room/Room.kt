@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2024 LiveKit, Inc.
+ * Copyright 2023-2025 LiveKit, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,10 +26,13 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedFactory
 import dagger.assisted.AssistedInject
 import io.livekit.android.ConnectOptions
+import io.livekit.android.LiveKit
+import io.livekit.android.LiveKitOverrides
 import io.livekit.android.RoomOptions
 import io.livekit.android.Version
 import io.livekit.android.audio.AudioHandler
 import io.livekit.android.audio.AudioProcessingController
+import io.livekit.android.audio.AudioSwitchHandler
 import io.livekit.android.audio.AuthedAudioProcessingController
 import io.livekit.android.audio.CommunicationWorkaround
 import io.livekit.android.dagger.InjectionNames
@@ -38,6 +41,7 @@ import io.livekit.android.e2ee.E2EEOptions
 import io.livekit.android.events.*
 import io.livekit.android.memory.CloseableManager
 import io.livekit.android.renderer.TextureViewRenderer
+import io.livekit.android.room.metrics.collectMetrics
 import io.livekit.android.room.network.NetworkCallbackManagerFactory
 import io.livekit.android.room.participant.*
 import io.livekit.android.room.provisions.LKObjects
@@ -76,6 +80,17 @@ constructor(
     private val defaultDispatcher: CoroutineDispatcher,
     @Named(InjectionNames.DISPATCHER_IO)
     private val ioDispatcher: CoroutineDispatcher,
+    /**
+     * The [AudioHandler] for setting up the audio as need.
+     *
+     * By default, this is an instance of [AudioSwitchHandler].
+     *
+     * This can be substituted for your own custom implementation through
+     * [LiveKitOverrides.audioOptions] when creating the room with [LiveKit.create].
+     *
+     * @see [audioSwitchHandler]
+     * @see [AudioSwitchHandler]
+     */
     val audioHandler: AudioHandler,
     private val closeableManager: CloseableManager,
     private val e2EEManagerFactory: E2EEManager.Factory,
@@ -181,6 +196,12 @@ constructor(
         private set
 
     /**
+     * @suppress
+     */
+    @VisibleForTesting
+    var enableMetrics: Boolean = true
+
+    /**
      *  end-to-end encryption manager
      */
     var e2eeManager: E2EEManager? = null
@@ -244,6 +265,16 @@ constructor(
      */
     var videoTrackPublishDefaults: VideoTrackPublishDefaults by defaultsManager::videoTrackPublishDefaults
 
+    /**
+     * Default options to use when creating a screen share track.
+     */
+    var screenShareTrackCaptureDefaults: LocalVideoTrackOptions by defaultsManager::screenShareTrackCaptureDefaults
+
+    /**
+     * Default options to use when publishing a screen share track.
+     */
+    var screenShareTrackPublishDefaults: VideoTrackPublishDefaults by defaultsManager::screenShareTrackPublishDefaults
+
     val localParticipant: LocalParticipant = localParticipantFactory.create(dynacast = false).apply {
         internalListener = this@Room
     }
@@ -254,6 +285,14 @@ constructor(
     @get:FlowObservable
     val remoteParticipants: Map<Participant.Identity, RemoteParticipant>
         get() = mutableRemoteParticipants
+
+    /**
+     * A convenience getter for the audio handler as a [AudioSwitchHandler].
+     *
+     * Will return null if [audioHandler] is not a [AudioSwitchHandler].
+     */
+    val audioSwitchHandler: AudioSwitchHandler?
+        get() = audioHandler as? AudioSwitchHandler
 
     private var sidToIdentity = mutableMapOf<Participant.Sid, Participant.Identity>()
 
@@ -278,11 +317,13 @@ constructor(
         RoomOptions(
             adaptiveStream = adaptiveStream,
             dynacast = dynacast,
+            e2eeOptions = e2eeOptions,
             audioTrackCaptureDefaults = audioTrackCaptureDefaults,
             videoTrackCaptureDefaults = videoTrackCaptureDefaults,
             audioTrackPublishDefaults = audioTrackPublishDefaults,
             videoTrackPublishDefaults = videoTrackPublishDefaults,
-            e2eeOptions = e2eeOptions,
+            screenShareTrackCaptureDefaults = screenShareTrackCaptureDefaults,
+            screenShareTrackPublishDefaults = screenShareTrackPublishDefaults,
         )
 
     /**
@@ -441,6 +482,12 @@ constructor(
                 val videoTrack = localParticipant.createVideoTrack()
                 localParticipant.publishVideoTrack(videoTrack)
             }
+
+            coroutineScope.launch {
+                if (enableMetrics) {
+                    collectMetrics(room = this@Room, rtcEngine = engine)
+                }
+            }
         }
 
         val outerHandler = coroutineContext.job.invokeOnCompletion { cause ->
@@ -488,6 +535,12 @@ constructor(
         }
         options.videoTrackPublishDefaults?.let {
             videoTrackPublishDefaults = it
+        }
+        options.screenShareTrackCaptureDefaults?.let {
+            screenShareTrackCaptureDefaults = it
+        }
+        options.screenShareTrackPublishDefaults?.let {
+            screenShareTrackPublishDefaults = it
         }
         adaptiveStream = options.adaptiveStream
         dynacast = options.dynacast
@@ -617,6 +670,8 @@ constructor(
 
         mutableRemoteParticipants = newParticipants
         eventBus.postEvent(RoomEvent.ParticipantDisconnected(this, removedParticipant), coroutineScope)
+
+        localParticipant.handleParticipantDisconnect(identity)
     }
 
     fun getParticipantBySid(sid: String): Participant? {
@@ -1164,6 +1219,10 @@ constructor(
         publication?.onTranscriptionReceived(event)
     }
 
+    override fun onRpcPacketReceived(dp: LivekitModels.DataPacket) {
+        localParticipant.handleDataPacket(dp)
+    }
+
     /**
      * @suppress
      */
@@ -1244,6 +1303,23 @@ constructor(
                 }
             }
         }
+    }
+
+    /**
+     * @suppress
+     */
+    override fun onLocalTrackSubscribed(response: LivekitRtc.TrackSubscribed) {
+        val publication = localParticipant.trackPublications[response.trackSid] as? LocalTrackPublication
+
+        if (publication == null) {
+            LKLog.w { "Could not find local track publication for subscribed event " }
+            return
+        }
+
+        coroutineScope.launch {
+            emitWhenConnected(RoomEvent.LocalTrackSubscribed(this@Room, publication, this@Room.localParticipant))
+        }
+        this.localParticipant.onLocalTrackSubscribed(publication)
     }
 
     /**
